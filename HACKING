@@ -1,0 +1,326 @@
+This file is intended to be a quick guide on how to contribute to the  libpcap
+project. It's purpose is to help people to get to know how the project is
+organized, and help them to join and contribute.
+
+Please extend this file with any information that you consider useful, or
+better yet, any information that would have made it easier for you to join.
+
+At time of writing I'm also just beginning to get a grasp of what and how,
+so some information here might be trivial, but it still might be helpful
+for somebody.
+
+Version list:
+  2011.12.27. by Vandra Ákos - initial creation, two sections:
+								   adding a new data source
+								   contributing code
+
+-------------------------------------------------------------------------------
+ Adding a new data source to libpcap
+-------------------------------------------------------------------------------
+
+I have addded support for the canusb device, so I'll be presenting my
+workflow based on it. Please use the dates in the version list and
+refer to my code during reading if needed.
+
+Every datasource has 2 parts:
+  - Discovering the devices present
+  - Opening and capturing data from the devices
+  
+To add support for another, new device one has to add these two functionalities
+and register the new code with the main libpcap sources.
+
+Step 1. 
+		Come up with a name for your datasource. My source's name is "canusb"
+Step 2. 
+		Add a new header and source file to the libpcap directory, usually named
+		"pcap-$NAME-$PLATFORM.c"
+		If your datasource is not platform-dependent, you may leave out the 
+		$PLATFORM part.
+		For me, it was "pcap-canusb-linux.c"
+Step 3. 
+		Usually all functions in these source files will be named $NAME_XXX like
+		canusb_create, canusb_platform_finddevs, etc, and will be made static,
+		unless they are needed somewhere in the libpcap source.
+		In my case only two interface functions, create and platform_finddevs
+		were needed to be made non-static.
+Step 4.
+		Add interface for device discovery.
+		
+		Usually, if your datasource is platform dependent, you will add a 
+		fucntion named $NAME_platform_finddevs, which is responsible for 
+		detecting any present devices, and adding them to the device list.
+		
+		It's prototype is:
+		
+		int canusb_platform_finddevs(pcap_if_t **alldevsp, char *err_str);
+		
+		It should do any discovery necessary, and add each found device with a 
+		call to 
+
+		pcap_add_if(alldevsp, dev_name, 0, dev_descr, err_str)
+		
+		where dev_name is the name of the device and dev_descr is a 
+		human-readable description of it.
+		
+		if the pcap_add_if returns a negative number, your function should bail,
+		free any allocated resources and return -1.
+		if the discovery is successful, it should return the number of found 
+		devices.
+		
+Step 5.
+		Add interface for creating a handle to your device.
+		
+		Capturing from device is usually a three-step procedure:
+		  - creating the device handle
+		  - activating the device for reading
+		  - doing the reading itself.
+		  
+		Creating the device should not do anything else but what is absolutely
+		necessary to see if the device is not only present, but we have the
+		necessary permissions to open it, and read from it.
+		
+		As libpcap doesn't know anything about how our device works, creating
+		the device is also responsible for pointing out the function which
+		can do the device activation - using the pcap_t structure and function
+		pointers, so it must have a predefined prototype.
+		
+		The prototype for the creation of the device should be (although not
+		enforced, as you will have to call it directly by patching a libpcap 
+		file - later on -, but nonetheless recommended if later a script will
+		be employed to collect the creatable interfaces)
+		
+		pcap_t * canusb_create(const char *device, char *ebuf);
+		
+		returns NULL on error, and fills ebuf with any encountered error.
+		
+		Usually calls pcap_create_common(device, ebuf) to create the handle,
+		and then modifies it according to your needs.
+				
+Step 6. 
+		Add activation function.
+				
+		This function is responsible for doing the "real" opening, and starting
+		the data capture.
+		
+		It's prototype must be:
+		
+		static int canusb_activate(pcap_t* handle)
+		
+		If you need the device's name which libpcap wants to activate, you may 
+		use handle->opt.source, which is the same as the "device" parameter 
+		passed to $NAME_create.      
+		
+		For any non-standard actions, it should set the according function 
+		pointers to be called (otherwise the default pcap_handler is called),
+		see my implementation for details.
+		
+		Next it should some of the proprerties of the device, like the DLT
+		(see next section), buffer size, and offset. <-- What are these things
+		really for?..
+		
+		Now you should do the real opening of the device which should be 
+		successful, as you did a nice check in $NAME_create, right? :)
+		
+		If you have to do the capturing on another thread, because it is
+		CPU-consuming, or has to use synchronous calls, or whatever reason,
+		THIS is the place to create it.
+		
+		Finally set the handles fd and selectable_fd proprerties that will
+		be used to wait for data from your datasource.
+		
+		Note: you *MUST* supply these values, the $NAME_read handle will be
+		called only when the selectable_fd shows data ready to be read!
+		
+Step 7. 
+    Choosing a DLT
+    
+    Note: I don't fully understand DLTs, and why they are needed, so anything
+    you read here are a major guess.
+    
+    Libpcap communicates the format in which data packets are formatted using
+    DLTs, which are constants that both libpcap, and the user application know.
+    
+    I think they are mostly used for advanced things like BPF packet filtering,
+    and to know what is the Link-layer protocol in use, and thus what kind of 
+    higher-level protocols might be applicable for the data. For example a CAN 
+    datasource will never spit out IP packets.
+		
+Step 8.
+		Registering your nice little datasource in the libpcap source.
+		
+		Okay, I know, this should come earlier, as you probably want to test 
+		along, but I'm quite sure you read the whole document end to end first
+		before start monkey-coding... Am I right?.. See, told ya! :)
+		
+		There are 3 main steps to do this:
+		
+		- Register your new source files in the automake system
+		- Register your new device finder method.
+		- Register your new data source creation method
+		
+Step 8.1a
+		Are you familiar with autoconf? I'm not. :)
+		
+		Suppose you have two new files, pcap-canusb-linux.c, and 
+		pcap-canusb-linux.h that you need to build your datasource.
+		Also suppose that you need the libusb-1.0 library for it to work,
+		but any version of it is fine.
+		
+		What you need to do is:
+		
+		open up configure.in, search for the section where the datasources are
+		registered, by searching for PCAP_BT_SUPPORT, for exapmle.
+		
+		Add and modify this part of code to your needs:
+		
+		AC_ARG_ENABLE([canusb],
+		[AC_HELP_STRING([--enable-canusb],[enable canusb support @<:@default=yes, if support available@:>@])]
+		,enable_canusb=yes)
+
+		if test "x$enable_canusb" != "xno" ; then
+			dnl check for canusb support
+			case "$host_os" in
+			linux*)
+				AC_CHECK_HEADER(libusb-1.0/libusb.h,
+				[
+				    AC_DEFINE(PCAP_SUPPORT_CANUSB, 1, [target host supports canusb])
+				    CANUSB_SRC=pcap-canusb-linux.c
+				    LIBS="-lusb-1.0 $LIBS"
+				    AC_MSG_NOTICE(canusb sniffing is supported)
+				],
+				AC_MSG_NOTICE(canusb sniffing is not supported; install libusb1.0 lib devel to enable it)
+				)
+				;;
+			*)
+				AC_MSG_NOTICE(no canusb support implemented for $host_os)
+				;;
+			esac
+			AC_SUBST(PCAP_SUPPORT_CANUSB)
+			AC_SUBST(CANUSB_SRC)
+		fi		
+		
+		It's somewhat self-explanatory, somewhat very strange, somewhat bash, 
+		somewhat excel/calc syntax. Quick how-to-read-this: AC_CHECK_HEADER 
+		checks if the header file in the first parameter exists on the build system
+		and executes the statements in the second parameter, if it does not, it
+		executes the statements in the third.
+		
+		AC_ARG_ENABLE adds a new parameter to ./configure, and it presents it in 
+		the --help, very convenient way. Also executes the statements in the third 
+		parameter if it will be set (we just set a variable to yes)
+		
+		If you consider that your data source is supported on the host, you should
+		set a define macro so that you can conditionally build your code, so that
+		you don't cause a build failiure on a host that does not.
+		You should also supply your list of source files in a variable to be used 
+		later by Makefile.in
+		
+		You should read up on autoconf and add any check and actions that you might
+		need.
+		
+Step 8.1b
+    Open up Makefile.in
+    
+    Add @$NAME_SRC@ to the PSRC variable.
+		
+Step 8.2
+
+    To register your device handler, search for the pcap_platform_finddevs 
+    function according to your platform. For linux it's in pcap-linux.c.
+    
+    Enclosed in conditional building, add a call to your platform_finddev
+    function, like this:
+    
+    #if PCAP_SUPPORT_CANUSB
+      if (canusb_platform_finddevs(alldevsp, errbuf) < 0)
+        return (-1);
+    #endif
+    
+Step 8.3
+
+    To register your data source creation method, search for the pcap_create
+    function according to your platform. For linux it's also in pcap-linux.c.
+    
+    Enclosed in conditional building, add a call to your _create function, if
+    you suspect that the device might be yours.
+    Warning: As the function uses a lot of strstr calls, and calls the _create
+    handler of the first match, be sure to add your handler in the correct 
+    place. I had a lot of wtf-s, because I added mine to the end of the 
+    function, and my canusb_create didn't get called no matter what.
+    Turns out my check was for "canusb", and a few lines above there was a 
+    check for "can", which also matched, and pcap_create never reached my check.
+    
+    #if PCAP_SUPPORT_CANUSB
+      if (strstr(device, "canusb")) {
+        return canusb_create(device, ebuf);
+      }
+    #endif    
+    
+Step 9.
+    Advanced topics
+    
+    Other than just reading from a datasource, libpcap can do a lot more, but
+    I didn't really go into details. As far as I understand, it can publish
+    statistics about how much data was lost, or even inject packets.
+    I just skipped over these functions, but if you ever get to implement one
+    of them, just add a few lines here about how to do it, to ease others
+    learning curve.
+    
+    For a "just work" implementation (that does nothing), see pcap-canusb-linux.c
+    
+Step 10.
+    Happyness.
+    
+    You should be able to build your code now.
+    Do:
+      automake
+      autoheader
+      ./configure
+      make
+      make install
+      
+    Your new datasource should automagically pop up in wireshark, or whereever.    
+    
+-------------------------------------------------------------------------------
+ Contributing code to libpcap
+-------------------------------------------------------------------------------
+
+So you implemented a new datasource and would love to see it in the main code 
+tree? Or have fixed a bug, added an awesome new feature, and a few bugs along
+with it? :)
+
+You should commit the code to a public repository, and ask one of the 
+maintainers to check it out, and pull it to the main source tree.
+
+To do this you have to:
+
+Step 0.
+    Read this to get started with git, if you are not familiar: 
+		http://progit.org/book/
+		
+		Yeah I know it's long, but you only need to chew through the first ~70 pages,
+		the reading is quite pleasent, and you'll jawdrop on what an effective tool
+		git is, bot usage-wise, and implementation-wise.
+Step 1.
+		Subscribe to the tcpdump-workers list. 
+		http://www.tcpdump.org/#mailing-lists
+Step 2.
+		Clone the repository
+		git clone git://bpf.tcpdump.org/libpcap
+Step 3.
+		Register to github.com, add your ssh key, and fork the code by visiting 
+		https://github.com/mcr/libpcap
+
+Step 4.
+		Add your github remote to your cloned git tree,
+		git remote add github git@github.com:$GITHUB_USERNAME/libpcap.git
+Step 5.
+		Commit your changes to the local git repo. Use nice commit messages :)
+Step 6.
+		Push them to your github repo.
+		git push github
+Step 7.
+		Write email to the tcpdump-workers list and ask a maintainer to pull your 
+		code, if deemed worthy.
+Step 8.
+		Happyness.
